@@ -1,0 +1,24 @@
+# Répertoire des providers/plugins téléchargés
+.terraform/
+.terraform.lock.hcl
+
+# State (contient des secrets en clair)
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Variables (peuvent contenir des valeurs sensibles)
+*.tfvars
+*.tfvars.json
+
+# Clés privées générées
+*.pem
+
+# Fichiers de plan / crash
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
