@@ -1,21 +1,28 @@
 ---
 - name: Install of Nginx
   hosts: web_servers
-  become: yes
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Wait for SSH to be reachable
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 180
   tasks:
     - name: Install Nginx
-      apt:
+      ansible.builtin.apt:
         name: nginx
         state: present
-        update_cache: yes
+        update_cache: true
 
     - name: Start and enable Nginx service
-      service:
+      ansible.builtin.service:
         name: nginx
         state: started
-        enabled: yes
+        enabled: true
 
     - name: Deploy Tooplate template
-      copy:
+      ansible.builtin.copy:
         src: site/
         dest: /var/www/html/
+        mode: '0644'
