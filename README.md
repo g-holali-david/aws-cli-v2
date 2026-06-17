@@ -1,42 +1,57 @@
-# aws-cli-v1 — Déploiement d'un site web sur AWS (IPSSI)
+# aws-cli-v2 — Déploiement d'un site web sur AWS (IPSSI)
 
-Projet d'infrastructure AWS provisionnant une instance **EC2** qui héberge un
-site web statique (template *Barista*) servi par **Nginx**.
+Provisioning d'une instance **EC2 (Ubuntu)** qui héberge un site web statique
+(template *Barista* de Tooplate) servi par **Nginx**.
 
-Le projet illustre **trois approches complémentaires** du provisioning :
-
-| Approche | Outil | Rôle |
-|----------|-------|------|
-| Impérative | **AWS CLI** + `make` | Création du réseau (NACL) et des instances EC2 via scripts Bash |
-| Déclarative | **Terraform** | Provisioning complet : subnet, security group, key pair, EC2 |
-| Configuration | **Ansible** | Installation de Nginx et déploiement du site sur l'instance |
+Le déploiement est piloté de bout en bout par un **`Makefile`** (à la racine) qui
+orchestre **Terraform** (infrastructure) puis **Ansible** (configuration du
+serveur). Un script **AWS CLI** complémentaire illustre l'approche impérative.
 
 Région par défaut : **`eu-west-3`** (Paris).
+
+---
+
+## Architecture provisionnée
+
+Terraform crée, dans un VPC existant :
+
+- un **subnet** dédié (CIDR configurable) ;
+- un **security group** ouvrant `22` (SSH), `80` (HTTP) et un port applicatif
+  configurable, sortie ouverte ;
+- une **key pair** : clé RSA 4096 générée localement (`tls_private_key`),
+  enregistrée en `.pem` (permissions `0400`) et poussée sur AWS ;
+- une **instance EC2** (`t2.micro` par défaut) avec IP publique, rattachée au
+  subnet et au security group.
+
+Ansible installe ensuite Nginx et déploie le site sur cette instance.
 
 ---
 
 ## Structure du dépôt
 
 ```
-infra/
-├── Makefile                 # Cibles make pour piloter l'AWS CLI (NACL + EC2)
-├── cli/
-│   ├── constants/vppc.sh     # Variables/constantes partagées
-│   └── services/ec2.sh       # Création d'une NACL + règle d'entrée (AWS CLI)
-├── terraform/
-│   ├── terraform.tf          # Providers (aws, tls, local) + backend
-│   ├── variables.tf          # Variables d'entrée (region, vpc_id, ami…)
-│   ├── main.tf               # Subnet, SG, key pair, instance EC2
-│   ├── outputs.tf            # IDs, IP publique, commande SSH
-│   ├── terraform.tfvars      # Valeurs (NON versionné)
-│   └── *.pem / *.tfstate     # Clé privée et state (NON versionnés)
-└── ansible/
-    ├── inventory.ini         # Hôtes cibles (IP publique de l'EC2)
-    ├── nginx.yml             # Playbook : install Nginx + déploie le site
-    └── site/                 # Template statique "Barista" (HTML/CSS/JS)
+.
+├── Makefile                      # ★ Pilote du déploiement (Terraform + inventaire Ansible)
+├── README.md
+└── infra/
+    ├── terraform/
+    │   ├── terraform.tf          # Providers (aws ~>5, tls ~>4, local ~>2)
+    │   ├── variables.tf          # Entrées : project_name, region, vpc_id, ami, port…
+    │   ├── locals.tf             # Noms dérivés ("<project>-subnet", "-sg", "-key", "-instance")
+    │   ├── main.tf               # Subnet, SG, key pair, clé .pem, instance EC2
+    │   ├── outputs.tf            # IDs, IP publique, chemin de la clé, commande SSH
+    │   ├── terraform.tfvars      # Valeurs locales (NON versionné)
+    │   └── *.pem / *.tfstate*    # Clé privée et state (NON versionnés)
+    ├── ansible/
+    │   ├── inventory.ini         # Généré par `make tr_o` (IP + chemin de la clé)
+    │   ├── nginx.yml             # Playbook : installe Nginx + déploie site/
+    │   └── site/                 # Template statique "Barista" (HTML/CSS/JS)
+    └── cli/
+        ├── constants/vppc.sh     # Constantes partagées
+        └── services/ec2.sh       # Script AWS CLI autonome : crée une NACL + règle d'entrée
 ```
 
-> ⚠️ Les fichiers sensibles (`*.pem`, `*.tfstate*`, `*.tfvars`) sont exclus du
+> ⚠️ Fichiers sensibles (`*.pem`, `*.tfstate*`, `*.tfvars`) exclus du
 > versionnement via `infra/terraform/.gitignore`. Ne les committez jamais.
 
 ---
@@ -46,8 +61,10 @@ infra/
 - [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) configuré (`aws configure`)
 - [Terraform](https://developer.hashicorp.com/terraform/install) ≥ 1.5
 - [Ansible](https://docs.ansible.com/ansible/latest/installation_guide/index.html)
-- `make` et `jq` (utilisés par les scripts Bash)
-- Un compte AWS avec les droits EC2/VPC et un VPC existant
+- `make` et `jq`
+- Un compte AWS avec droits EC2/VPC et un **VPC existant**
+- **Windows** : le `Makefile` exécute ses recettes via **Git Bash** (il utilise
+  `grep`, `awk`, `realpath`…). Lancez `make` depuis un terminal Git Bash.
 
 Vérifier l'accès AWS :
 
@@ -57,77 +74,101 @@ aws sts get-caller-identity
 
 ---
 
-## 1. Approche AWS CLI (`make`)
+## Configuration
 
-Pilotée depuis `infra/Makefile`.
+Avant tout déploiement, renseigner `infra/terraform/terraform.tfvars`. La
+variable **`ami` est obligatoire** (aucun défaut) et doit pointer vers une **AMI
+Ubuntu** (le playbook utilise `apt`, et l'inventaire se connecte en `ubuntu`).
 
-```bash
-cd infra
-
-make help            # Liste les cibles disponibles
-make check           # Vérifie l'identité AWS (credentials)
-make vpcs            # Liste les VPC de la région
-
-# Provisionner réseau + instance
-make up VPC_ID=vpc-xxxxxxxx
-
-# Détruire (IDs récupérés ci-dessus)
-make down INSTANCE_ID=i-xxxx NACL_ID=acl-xxxx
+```hcl
+# infra/terraform/terraform.tfvars
+ami    = "ami-xxxxxxxxxxxxxxxxx"   # AMI Ubuntu dans eu-west-3
+vpc_id = "vpc-xxxxxxxxxxxxxxxxx"
+# project_name, region, subnet_cidr, port, instance_type ont des défauts (voir variables.tf)
 ```
-
-Variables surchargeables : `REGION`, `VPC_ID`, `INSTANCE_TYPE`, `AMI_ID`,
-`EC2_NAME`, `NACL_NAME`.
 
 ---
 
-## 2. Approche Terraform
+## Déploiement (via le `Makefile`)
+
+`make` seul (ou `make help`) liste les cibles disponibles :
+
+| Cible | Action |
+|-------|--------|
+| `make help` | Affiche l'aide (cibles documentées) |
+| `make tr_l` | **Lint** : `terraform fmt -check -recursive` + `terraform validate` |
+| `make tr_p` | **Plan** : prévisualise les changements (dépend de `tr_l`) |
+| `make tr_a` | **Apply** : crée l'infra (`-auto-approve`, dépend de `tr_p`) |
+| `make tr_o` | Génère `infra/ansible/inventory.ini` depuis les outputs Terraform |
+| `make tr_d` | **Destroy** : supprime toute l'infra (`-auto-approve`) |
+
+Les cibles s'enchaînent par dépendances : `tr_a` → `tr_p` → `tr_l`. Lancer
+`make tr_a` exécute donc lint → plan → apply dans l'ordre.
+
+### Workflow complet
 
 ```bash
-cd infra/terraform
+# 0. Initialisation Terraform (une seule fois — pas de cible make pour ça)
+cd infra/terraform && terraform init && cd ../..
 
-terraform init          # Télécharge les providers
-terraform plan          # Prévisualise les changements
-terraform apply         # Crée subnet + SG + key pair + EC2
+# 1. Provisionner l'infrastructure (lint → plan → apply)
+make tr_a
 
-terraform output        # IP publique, commande SSH, IDs…
-terraform destroy       # Supprime toutes les ressources
-```
+# 2. Générer l'inventaire Ansible à partir des outputs (IP + clé .pem)
+make tr_o
 
-Terraform génère la clé privée RSA (`claire-davs-key.pem`, permissions `0400`)
-et expose une commande `ssh_command` prête à l'emploi dans les outputs.
-
-Configurer les valeurs dans `terraform.tfvars` (région, `vpc_id`, `ami`,
-`instance_type`, ports…) avant l'`apply`.
-
----
-
-## 3. Approche Ansible (configuration du serveur)
-
-Une fois l'instance EC2 disponible, renseignez son IP publique dans
-`infra/ansible/inventory.ini`, puis :
-
-```bash
+# 3. Configurer le serveur : installer Nginx + déployer le site
 cd infra/ansible
-
-ansible all -m ping                 # Vérifie la connectivité SSH
+ansible all -m ping -i inventory.ini          # vérifie la connectivité SSH
 ansible-playbook -i inventory.ini nginx.yml
+
+# 4. Le site est accessible sur http://<IP_PUBLIQUE>
+
+# 5. Tout détruire après usage
+make tr_d
 ```
 
-Le playbook `nginx.yml` :
-1. installe et active **Nginx** ;
-2. déploie le contenu de `site/` dans `/var/www/html/`.
+> `make tr_o` n'affiche rien dans le terminal : c'est normal, il écrit
+> directement dans `infra/ansible/inventory.ini`. Vérifiez avec
+> `cat infra/ansible/inventory.ini`.
 
-Le site est ensuite accessible sur `http://<IP_PUBLIQUE>`.
+---
+
+## Le playbook Ansible
+
+`nginx.yml` cible le groupe `web_servers` (en `become`) et :
+
+1. installe **Nginx** (`apt`) ;
+2. démarre et active le service ;
+3. copie `site/` vers `/var/www/html/`.
+
+L'inventaire (`inventory.ini`) est généré automatiquement par `make tr_o` à
+partir de `terraform output` : IP publique de l'instance et chemin absolu de la
+clé privée.
+
+---
+
+## Approche AWS CLI (impérative, optionnelle)
+
+`infra/cli/services/ec2.sh` est un script Bash **autonome** (non piloté par le
+Makefile) qui illustre la création manuelle d'une **Network ACL** et d'une règle
+d'entrée via l'AWS CLI. Exécution directe :
+
+```bash
+bash infra/cli/services/ec2.sh <nom-de-la-nacl>
+```
+
+Il stocke la réponse dans `nacl.json` et en extrait le `NetworkAclId` avec `jq`.
 
 ---
 
 ## Sécurité
 
-- Les clés privées (`.pem`), le `terraform.tfstate` (contient des secrets en
-  clair) et les `.tfvars` **ne sont pas versionnés** — voir `.gitignore`.
-- Les security groups ouvrent par défaut les ports `22` (SSH), `80` (HTTP) et le
-  port applicatif à `0.0.0.0/0` : à restreindre pour un usage réel.
-- Pensez à `terraform destroy` / `make down` après usage pour éviter les coûts.
+- Clés privées (`.pem`), `terraform.tfstate` (secrets en clair) et `.tfvars`
+  **ne sont pas versionnés** — voir `.gitignore`.
+- Le security group ouvre `22`, `80` et le port applicatif à `0.0.0.0/0` :
+  à restreindre pour un usage réel.
+- Pensez à `make tr_d` après usage pour éviter les coûts AWS.
 
 ---
 
