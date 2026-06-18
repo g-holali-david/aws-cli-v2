@@ -51,7 +51,7 @@ Ansible installe ensuite Nginx et déploie le site sur cette instance.
         └── services/ec2.sh       # Script AWS CLI autonome : crée une NACL + règle d'entrée
 ```
 
-> ⚠️ Fichiers sensibles (`*.pem`, `*.tfstate*`, `*.tfvars`) exclus du
+>  Fichiers sensibles (`*.pem`, `*.tfstate*`, `*.tfvars`) exclus du
 > versionnement via `infra/terraform/.gitignore`. Ne les committez jamais.
 
 ---
